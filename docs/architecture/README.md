@@ -9,7 +9,8 @@ scope, except where the backend has to keep a contract the frontend depends on.
   insights, Langfuse tracing and multi-tenancy.
 - **How it was produced:** static reading of about 1,430 non-test source files across `api/`,
   `packages/api`, `packages/data-schemas` and `packages/data-provider`. `@librechat/agents`, the
-  LangGraph-based agent SDK, is an external npm package (v3.9.1). It is described from how this code calls it.
+  LangGraph-based agent SDK, is an external npm package (v3.9.1) from a separate repository. It has
+  [its own document](agents-sdk/README.md).
 - **How to read it:** this page gives the diagrams, the design decisions and the Python blueprint.
   Each section links to a reference chapter with file paths, field lists, env vars and edge cases.
 
@@ -24,6 +25,10 @@ scope, except where the backend has to keep a contract the frontend depends on.
 | [07 Data model](reference/07-data-model.md) | All 47 collections with fields and indexes, relationships, data-access methods, migrations |
 | [08 Background work, observability, deployment](reference/08-background-observability-deployment.md) | Background loops, schedules, triggers, queued turns, deletion cascades, OTel, Langfuse, containers |
 | [09 HTTP API inventory](reference/09-http-routes.md) | About 360 routes, each with its method, path, middleware chain and handler |
+
+The agent runtime has its own document: [@librechat/agents SDK architecture](agents-sdk/README.md), with six more
+reference chapters (run API and event contract, graphs and HITL, tools, LLM providers, context management,
+observability and porting order).
 
 ---
 
@@ -534,7 +539,9 @@ stateDiagram-v2
 
 ## 9. Agent runtime
 
-`createRun` (`packages/api/src/agents/run.ts`) builds a LangGraph graph through `@librechat/agents`:
+`createRun` (`packages/api/src/agents/run.ts`) builds a LangGraph graph through `@librechat/agents`. The SDK
+itself is mapped in its own document, [@librechat/agents SDK architecture](agents-sdk/README.md). This section
+covers how LibreChat uses it.
 
 ```mermaid
 flowchart TB
@@ -1108,7 +1115,7 @@ Every route with its middleware chain and handler: [reference 09](reference/09-h
 | Mongoose + data-schemas methods | **PyMongo async / Motor** with **Beanie** or plain pydantic documents behind repository classes. Raw `find_one_and_update` for every CAS or lease. |
 | Tenant plugin + AsyncLocalStorage | `contextvars.ContextVar` + a `TenantScopedCollection` wrapper (filters, stamping, `$set` guard, `aggregate` `$match`), plus `run_as_system()` |
 | passport strategies | **PyJWT**, **authlib** (OAuth2/OIDC, PKCE), **ldap3**, **python3-saml**, **passlib/bcrypt** (cost 10), **pyotp** |
-| `@librechat/agents` (LangGraph JS) | **langgraph** + **langchain-core** + provider packages (`langchain-openai`, `-anthropic`, `-google-genai`/`-vertexai`, `-aws`), or **litellm**. You write the event translator and content aggregator yourself. |
+| `@librechat/agents` (LangGraph JS) | **langgraph** + **langchain-core** + provider packages (`langchain-openai`, `-anthropic`, `-google-genai`/`-vertexai`, `-aws`), or **litellm**. You write the event translator and content aggregator yourself. The porting plan is in [the SDK document, section 12](agents-sdk/README.md#12-python-porting-plan). |
 | LangGraph Mongo checkpointer | `langgraph-checkpoint-mongodb` (`MongoDBSaver`) with a namespace per generation + TTL |
 | GenerationJobManager + SSE | **sse-starlette** `EventSourceResponse`. The job store is `redis.asyncio` (hash + Redis Streams `XADD`/`XRANGE` + Lua CAS) or an in-memory dict. Pub/sub carries sequence-numbered frames. |
 | MCP SDK | Official **`mcp`** Python SDK (stdio, SSE, streamable-http, websocket clients; `OAuthClientProvider`) + optionally `langchain-mcp-adapters` |
@@ -1208,8 +1215,10 @@ claim tokens, unique partial indexes used as concurrency guards, and the owner-d
 
 1. **Rebuilding `@librechat/agents`.** Event normalization, content aggregation, provider quirks
    (Anthropic thinking and cache control, Google thought signatures, OpenAI Responses API), pruning and
-   summarization make this the largest piece of work. Start from LangGraph Python and write golden
-   tests against recorded SSE streams from the Node server.
+   summarization make this the largest piece of work: about 123k lines of TypeScript. Start from LangGraph
+   Python and write golden tests against recorded SSE streams from the Node server. A Node sidecar running
+   the TypeScript SDK can bridge the gap until the Python port is ready
+   ([SDK document, section 12.4](agents-sdk/README.md#124-how-to-de-risk-it)).
 2. **Frontend coupling.** If the Python backend serves the existing SPA, every response shape and SSE
    frame counts as a contract. Record real traffic from the Node backend and replay it as fixtures.
 3. **Concurrency semantics.** Leases, fences and CAS rules are spread across the schedule, trigger,
