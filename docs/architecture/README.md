@@ -235,15 +235,25 @@ machine-auth middleware itself. Those middlewares also set the tenant ALS contex
 ### 4.3 The chat request middleware chain
 
 ```mermaid
-flowchart TB
-  P["POST /api/agents/chat/:endpoint?"] --> G1["rejectChatStartsUntilReady"]
-  G1 --> A1["requireJwtAuth + tenant context"] --> A2["checkBan"] --> A3["uaParser"]
-  A3 --> A4["configMiddleware: req.config = merged AppConfig"]
-  A4 --> L1["retry-probe limiter + message IP/user limiters"]
-  L1 --> F1["restoreResumeContext"] --> F2["PII message filter"] --> F3["OpenAI moderation"]
-  F3 --> Z1["role check: AGENTS.USE"] --> Z2["ACL: VIEW on agent_id"] --> Z3["validateConvoAccess"] --> Z4["guardSubagentThreadTurn"]
-  Z4 --> B1["buildEndpointOption<br/>parse body, apply model spec, start loadAgent"]
-  B1 --> CTL["AgentController: starts the job, returns 200 JSON"]
+flowchart LR
+  P["POST /api/agents/chat/:endpoint?"] --> S1
+  subgraph S1["Identity and limits"]
+    direction TB
+    G1["rejectChatStartsUntilReady"] --> A1["requireJwtAuth + tenant context"] --> A2["checkBan, uaParser"] --> A4["configMiddleware<br/>req.config = merged AppConfig"] --> L1["retry-probe + message<br/>IP/user limiters"]
+  end
+  subgraph S2["Content checks"]
+    direction TB
+    F1["restoreResumeContext"] --> F2["PII message filter"] --> F3["OpenAI moderation"]
+  end
+  subgraph S3["Access"]
+    direction TB
+    Z1["role: AGENTS.USE"] --> Z2["ACL: VIEW on agent_id"] --> Z3["validateConvoAccess"] --> Z4["guardSubagentThreadTurn"]
+  end
+  subgraph S4["Build and start"]
+    direction TB
+    B1["buildEndpointOption<br/>parse body, model spec,<br/>start loadAgent"] --> CTL["AgentController<br/>start job, 200 JSON"]
+  end
+  S1 --> S2 --> S3 --> S4
 ```
 
 Rate limiters (login, register, messages, uploads, TTS/STT, tool calls, and others) use
@@ -373,7 +383,7 @@ flowchart LR
    `SHARE_PUBLIC` to make a resource public.
 
 ```mermaid
-flowchart TB
+flowchart LR
   Q["canAccessResource: resourceType, bits, id param"] --> H1{"user holds manage capability<br/>for this resource type?"}
   H1 -->|yes| OK["next"]
   H1 -->|no| H2["resolve custom id such as agent_xxx to _id"]
