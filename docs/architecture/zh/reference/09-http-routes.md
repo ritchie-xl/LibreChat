@@ -416,3 +416,420 @@
 
 ### `/api/presets`：`routes/presets.js`
 路由器级：JWT。处理器为内联。
+
+| 方法 | 路径 | 中间件 | 说明 |
+|---|---|---|---|
+| GET | / | cfg | |
+| POST | / | cfg, filterPresetContent | 201 |
+| POST | /delete | – | 请求体 `{presetId?}` |
+
+### `/api/projects`：`routes/projects.js`
+路由器级：JWT。处理器来自 `P/projects/handlers.ts` 中的 `createProjectHandlers`。
+
+| 方法 | 路径 | 处理器 |
+|---|---|---|
+| GET | / | listProjects |
+| POST | / | createProject |
+| PUT | /conversations/:conversationId | assignConversationToProject |
+| GET | /:projectId | getProject |
+| PATCH | /:projectId | updateProject |
+| DELETE | /:projectId | deleteProject |
+
+### `/api/prompts`：`routes/prompts.js`
+路由器级：JWT、gCA(PROMPTS:USE)。
+- `create` = gCA(PROMPTS:USE+CREATE)
+- `grpAcc(P)` = `canAccessPromptGroupResource({requiredPermission: PermissionBits.P})`
+- `pAcc(P)` = `canAccessPromptViaGroup({requiredPermission: P, resourceIdParam: 'promptId'})`
+- 所有处理器都内联在该文件中，包括有名称的那些：createNewPromptGroup、addPromptToGroup、patchPromptGroup、deletePromptController、deletePromptGroupController。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| GET | /groups/:groupId | grpAcc(VIEW), cfg | 内联 |
+| GET | /all | cfg | 内联（感知 ACL 的列表） |
+| GET | /groups | cfg | 内联（分页的分组） |
+| POST | / | create, cfg | createNewPromptGroup |
+| POST | /groups/:groupId/prompts | checkPromptAccess, grpAcc(EDIT), cfg | addPromptToGroup |
+| POST | /groups/:groupId/use | promptUsageLimiter, grpAcc(VIEW) | 内联（incrementPromptGroupUsage） |
+| PATCH | /groups/:groupId | create, grpAcc(EDIT), cfg | patchPromptGroup |
+| PATCH | /:promptId/tags/production | create, pAcc(EDIT), cfg | 内联（makePromptProduction） |
+| GET | /:promptId | pAcc(VIEW), cfg | 内联 |
+| GET | / | cfg | 内联（`?groupId`） |
+| DELETE | /:promptId | create, pAcc(DELETE) | deletePromptController |
+| DELETE | /groups/:groupId | create, grpAcc(DELETE) | deletePromptGroupController |
+
+### `/api/skills`：`routes/skills.js`
+路由器级：JWT、cfg、gCA(SKILLS:USE)。
+- `create` = gCA(SKILLS:USE+CREATE)
+- `sAcc(P)` = `canAccessSkillResource({requiredPermission: P})`
+- 处理器：`getSkillsHandlers()`（`A/services/Skills/handlers.js`）包装了 `createSkillsHandlers`（`P/skills/handlers.ts`）。
+- 一个路由器级错误处理器会把 Multer 错误以及以 "Only " 开头的错误转换为 400。
+
+| 方法 | 路径 | 中间件 | 处理器 | 说明 |
+|---|---|---|---|---|
+| POST | /import | create, fileUploadIpLimiter, fileUploadUserLimiter, skillUpload（multer 内存存储，`.md`/`.zip`/`.skill`）, restoreTenantContextFromReq | `createImportHandler`（`P/skills/import.ts`） | multipart |
+| GET | / | maybeStartRequestSkillSync | handlers.list | |
+| POST | / | create | handlers.create | |
+| GET | /:id | sAcc(VIEW) | handlers.get | |
+| PATCH | /:id | create, sAcc(EDIT) | handlers.patch | |
+| DELETE | /:id | create, sAcc(DELETE) | handlers.delete | |
+| GET | /:id/files | sAcc(VIEW) | handlers.listFiles | |
+| POST | /:id/files | sAcc(EDIT), 上传限流器, multer `file`（10 MB）, restoreTenantContextFromReq | uploadFileHandler（内联） | multipart |
+| GET | /:id/files/*relativePath | sAcc(VIEW) | handlers.downloadFile | 文件下载 |
+| DELETE | /:id/files/*relativePath | sAcc(EDIT) | handlers.deleteFile | |
+
+### 小型路由器
+
+| 方法 | 路径 | 中间件 | 处理器（文件） | 说明 |
+|---|---|---|---|---|
+| GET | /api/categories | JWT | 内联（`getCategories`） | |
+| GET | /api/endpoints | JWT, cfg | endpointController（`A/controllers/EndpointController.js`） | |
+| GET | /api/endpoints/token-config | JWT, cfg | tokenConfigController（`A/controllers/TokenConfigController.js`） | |
+| GET | /api/balance | JWT, setBalanceConfig | `A/controllers/Balance.js` | |
+| GET | /api/models | JWT | modelController（`A/controllers/ModelController.js`） | |
+| GET | /api/config | （挂载时）preTenant, optJWT | 内联于 `routes/config.js` | 启动配置；没有用户时返回精简的登录前载荷 |
+| GET | /api/banner | optJWT | 内联（`getBanner`） | |
+
+### `/api/assistants`：`routes/assistants/*`
+路由器级（`index.js`）：JWT、checkBan、uaParser、cfg。v2 路由器会再加一次 cfg。
+
+控制器：
+- `A/controllers/assistants/v1.js`（c1）
+- `A/controllers/assistants/v2.js`（c2）
+- `A/controllers/assistants/chatV1.js`、`chatV2.js`
+
+`filterAssistantContent` = `createContentFilter`。聊天链为：`createMessageFilterPii`、validateModel、buildEndpointOption、validateAssistant、validateConvoAccess、guardSubagentThreadTurn。
+
+| 方法 | 路径 | 中间件 | 处理器 | 说明 |
+|---|---|---|---|---|
+| POST | /api/assistants/v1/actions/:assistant_id | – | 内联（`routes/assistants/actions.js`） | |
+| DELETE | /api/assistants/v1/actions/:assistant_id/:action_id/:model | – | 内联 | |
+| GET | /api/assistants/v1/tools | – | getAvailableTools（`A/controllers/PluginController.js`） | |
+| GET | /api/assistants/v1/documents | – | c1.getAssistantDocuments | |
+| POST | /api/assistants/v1 | filterAssistantContent | c1.createAssistant | |
+| GET | /api/assistants/v1/:id | – | c1.retrieveAssistant | |
+| PATCH | /api/assistants/v1/:id | filterAssistantContent | c1.patchAssistant | |
+| DELETE | /api/assistants/v1/:id | – | c1.deleteAssistant | |
+| GET | /api/assistants/v1 | – | c1.listAssistants | |
+| POST | /api/assistants/v1/chat/abort | – | `handleAbort()` | |
+| POST | /api/assistants/v1/chat | 聊天链 | chatV1 控制器 | **SSE**（`sendEvent`） |
+| POST | /api/assistants/v2/actions/:assistant_id | – | 内联 | |
+| DELETE | /api/assistants/v2/actions/:assistant_id/:action_id/:model | – | 内联 | |
+| GET | /api/assistants/v2/tools | – | getAvailableTools | |
+| GET | /api/assistants/v2/documents | – | c1.getAssistantDocuments | |
+| POST | /api/assistants/v2 | filterAssistantContent | c2.createAssistant | |
+| GET | /api/assistants/v2/:id | – | c1.retrieveAssistant | |
+| PATCH | /api/assistants/v2/:id | filterAssistantContent | c2.patchAssistant | |
+| DELETE | /api/assistants/v2/:id | – | c1.deleteAssistant | |
+| GET | /api/assistants/v2 | – | c1.listAssistants | |
+| POST | /api/assistants/v2/avatar/:assistant_id | – | c1.uploadAssistantAvatar | |
+| POST | /api/assistants/v2/chat/abort | – | handleAbort() | |
+| POST | /api/assistants/v2/chat | 聊天链 | chatV2 控制器 | **SSE** |
+
+### `/api/files`：`routes/files/index.js`（异步 `initialize()`）
+路由器级：JWT、cfg、checkBan、uaParser。
+- 在 `/speech` 挂载之后，`/speech` 以外的每个 POST 都要经过上传限流器（先 `fileUploadIpLimiter`，再 `fileUploadUserLimiter`）。`/usage` 改用 `fileUsageLimiter`。
+- 上传路由先运行 `upload.single('file')`（来自 `routes/files/multer.js` 的 multer），再运行 `restoreTenantContextFromReq`。
+- 当设置了 `FILE_UPLOAD_SSE_ENABLED` 且客户端发送 `Accept: text/event-stream` 时，文件上传可以选择以 **SSE** 应答（`P/files/sse.ts`）。
+
+| 方法 | 路径 | 中间件 | 处理器（文件） | 说明 |
+|---|---|---|---|---|
+| POST | /api/files/speech/stt | multer `audio`, sttIpLimiter, sttUserLimiter | speechToText（`A/services/Files/Audio`） | multipart |
+| POST | /api/files/speech/tts/manual | ttsIp/UserLimiter, `multer().none()`, PII 检查 | textToSpeech | 音频流 |
+| POST | /api/files/speech/tts | tts 限流器 | 内联 → streamAudio | 分块音频流 |
+| GET | /api/files/speech/tts/voices | tts 限流器 | getVoices | |
+| GET | /api/files/speech/config/get | – | getCustomConfigSpeech | |
+| GET | /api/files | – | 内联（`routes/files/files.js`） | 用户的文件 |
+| GET | /api/files/agent/:agent_id | – | 内联 | 智能体的文件 |
+| GET | /api/files/config | – | 内联 | 合并后的 fileConfig |
+| POST | /api/files/usage | fileUsageLimiter | 内联 | |
+| DELETE | /api/files | – | 内联 | 请求体 `{files:[...], agent_id?, assistant_id?, tool_resource?}` |
+| GET | /api/files/code/download/:session_id/:fileId | – | 内联 | **文件下载**（从代码环境管道转发的 octet-stream） |
+| GET | /api/files/:file_id/preview | fileAccess | 内联 | 预览状态 / 文本 |
+| GET | /api/files/download-url/:userId/:file_id | fileAccess | 内联 | JSON `{url, filename, type, metadata}`；不支持时返回 501 |
+| GET | /api/files/download/:userId/:file_id | fileAccess | 内联 | **文件下载**（流，或 302 重定向到签名 URL） |
+| POST | /api/files | multer file, 上传限流器 | handleFileUpload（`files.js`） | multipart；JSON 或 SSE |
+| POST | /api/files/images | multer, 限流器 | 内联（`routes/files/images.js`） | multipart；JSON 或 SSE |
+| POST | /api/files/images/avatar | multer, 限流器 | 内联（`routes/files/avatar.js`） | 返回 `{url}` |
+| POST | /api/files/images/agents/:agent_id/avatar | multer, 限流器, gCA(AGENTS:USE), canAccessAgentResource(EDIT, `agent_id`) | v1.uploadAgentAvatar（`A/controllers/agents/v1.js`） | |
+| POST | /api/files/images/assistants/:assistant_id/avatar | multer, 限流器 | c1.uploadAssistantAvatar | |
+
+`fileAccess` 定义在 `A/middleware/accessResources/fileAccess.js` 中。
+
+### `/images/`：`routes/static.js`
+挂载时使用 `createValidateImageRequest({secureImageLinks})`（`A/middleware/validateImageRequest.js`），它使用 P 中的 `createImageAuthorizationMiddleware`。路由器是 `staticCache(paths.imageOutput)`。它提供静态图片文件。
+
+### `/api/share`：`routes/share.js`
+挂载时带 `preTenant`。前 6 条路由只在开启 `ALLOW_SHARED_LINKS`（默认开启）时注册。
+- `sharedCfg` = `createSharedLinkConfigMiddleware`（`P/shared-links/config.ts`）
+- `shareCreate` = gCA(SHARED_LINKS:CREATE)
+- 处理器为内联。
+
+| 方法 | 路径 | 中间件 | 说明 |
+|---|---|---|---|
+| GET | /:shareId/config | optJWT, canAccessSharedLink, sharedCfg | 分享页的启动配置 |
+| GET | /:shareId | optJWT, shareIpLimiter, shareUserLimiter, canAccessSharedLink, sharedCfg | 被分享的对话 |
+| POST | /:shareId/fork | JWT, forkIpLimiter, forkUserLimiter, canAccessSharedLink, sharedCfg | `forkSharedConversation` |
+| GET | /:shareId/files/:file_id/preview | optJWT, optionalShareFileAuth, canAccessSharedLink, sharedCfg, resolveShareFile, enforceSharedFileContentPolicy | |
+| GET | /:shareId/files/:file_id/download | 与 preview 相同的链 | **文件下载**（attachment） |
+| GET | /:shareId/files/:file_id | 与 preview 相同的链 | **文件流**（inline） |
+| GET | / | JWT | 用户的链接（cursor、pageSize、search） |
+| GET | /link/:conversationId | JWT | |
+| POST | /:conversationId | JWT, cfg, shareCreate | 创建链接 |
+| PATCH | /:shareId | JWT, cfg, shareCreate | |
+| DELETE | /:shareId | JWT | |
+
+### `/api/roles`：`routes/roles.js`
+路由器级：JWT。`manage` = cap(MANAGE_ROLES)。处理器通过 `createPermissionUpdateHandler(key)` 内联生成。
+
+| 方法 | 路径 | 中间件 | 说明 |
+|---|---|---|---|
+| GET | /:roleName | – | 内联；只有访问其他角色或非默认角色时才需要 READ_ROLES |
+| PUT | /:roleName/prompts | manage | |
+| PUT | /:roleName/agents | manage | |
+| PUT | /:roleName/memories | manage | |
+| PUT | /:roleName/people-picker | manage | |
+| PUT | /:roleName/mcp-servers | manage | |
+| PUT | /:roleName/marketplace | manage | |
+| PUT | /:roleName/remote-agents | manage | |
+| PUT | /:roleName/skills | manage | |
+
+### `/api/agents`：`routes/agents/index.js` 及其子路由器
+在此挂载点之前、仅对 `/api/agents/chat` 生效的中间件：agentStartupIngressMiddleware、agentStartupTelemetryMiddleware、rejectChatStartsUntilReady。
+
+子路由器按以下顺序求值。机器认证的路由器位于 `router.use(requireJwtAuth)` 之前。
+
+**(a) `/api/agents/v1/responses`**（`routes/agents/responses.js`），即 Open Responses API。
+- 路由器级：preTenant、`requireRemoteAgentAuth`（`createRemoteAgentAuth`，`P/middleware/remoteAgentAuth.ts`）、cfg、`checkRemoteAgentsFeature`（gCA REMOTE_AGENTS:USE）。
+- `requireRemoteAgentAuth` 接受经 JWKS 校验的 OIDC Bearer 令牌，失败时回退到通过 `createRequireApiKeyAuth`（`P/apiKeys/middleware.ts`）校验的 API 密钥。
+- 控制器位于 `A/controllers/agents/responses.js`。
+
+| 方法 | 路径 | 中间件 | 处理器 | 说明 |
+|---|---|---|---|---|
+| POST | /api/agents/v1/responses | checkAgentPermission（`createCheckRemoteAgentAccess`） | createResponse | JSON；当 `stream: true` 时为 **SSE** |
+| GET | /api/agents/v1/responses/models | – | listModels | |
+| GET | /api/agents/v1/responses/:id | – | getResponse | |
+
+**(b) `/api/agents/v1/agents`**（`routes/agents/management.js`），基于 M2M 的智能体管理。
+- 路由器级：`requireAgentManagementAuth`（`createAgentManagementAuth`，`P/middleware/management.ts`：OIDC client-credentials Bearer 令牌加客户端绑定）、checkBan。
+- 有一个兜底的 404 JSON（`mapAgentManagementError`）。
+- 处理器位于 `P/agents/{creates,reads,updates,deletion,files}.ts`。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| POST | / | cfg | createAgentManagementCreateHandler |
+| GET | / | – | readHandlers.list |
+| POST | /:id/files | cfg, fileUploadIp/UserLimiter, fileHandlers.authorizeUpload, multer single, restoreTenantContextFromReq, 然后 handleUploadError | fileHandlers.upload（multipart） |
+| GET | /:id/files | – | fileHandlers.list |
+| DELETE | /:id/files/:fileId | – | fileHandlers.remove |
+| GET | /:id | – | readHandlers.get |
+| PATCH | /:id | cfg | updateHandler |
+| DELETE | /:id | – | deleteHandler |
+
+**(c) `/api/agents/v1/skills`**（`routes/agents/skills.js`）。
+- 路由器级：requireAgentManagementAuth、checkBan、cfg。有一个兜底的 404。
+- 处理器来自 `P/skills/management.ts` 中的 `createSkillManagementHandlers`。
+
+| 方法 | 路径 | 处理器 |
+|---|---|---|
+| GET | / | list |
+| GET | /:id | get |
+| PATCH | /:id | update |
+| GET | /:id/files | listFiles |
+| GET | /:id/files/*relativePath | getFile |
+| PUT | /:id/files/*relativePath | updateFile |
+
+**(d) `/api/agents/v1`**（`routes/agents/openai.js`），兼容 OpenAI 的路由以及事件触发器。
+- 路由器级：preTenant、requireRemoteAgentAuth、cfg、checkRemoteAgentsFeature。
+- 这些中间件作用于到达此路由器的每个 `/api/agents/v1/*` 请求。
+
+| 方法 | 路径 | 中间件 | 处理器（文件） | 说明 |
+|---|---|---|---|---|
+| POST | /api/agents/v1/events/bindings | agentEventUserLimiter, checkAgentTriggerPermission | `createAgentEventBindingHandlers.register`（`P/agents/triggers/bindings.ts`） | |
+| POST | /api/agents/v1/events | agentEventUserLimiter, createMessageFilterPii, eventBindingHandlers.resolve, checkAgentTriggerPermission | `createAgentTriggerIngressHandlers.enqueueEvent`（`P/agents/triggers/ingress.ts`） | |
+| GET | /api/agents/v1/events/:id | – | eventHandlers.getEvent | |
+| POST | /api/agents/v1/chat/completions | checkAgentPermission | OpenAIChatCompletionController（`A/controllers/agents/openai.js`） | JSON；当 `stream: true` 时为 **SSE** |
+| GET | /api/agents/v1/models | – | ListModelsController | |
+| GET | /api/agents/v1/models/:model | – | GetModelController | |
+
+**(e) JWT 路由。** 这些路由运行在 `router.use(requireJwtAuth)` 之后，接着是一个设置 `req._isAgentTrigger` 并调用 `captureScheduleFireContext` 的内联步骤，然后是 `checkBan`，最后是 `uaParser`。
+- `steerLim` = messageIpLimiter / messageUserLimiter，分别受 `LIMIT_MESSAGE_IP` / `LIMIT_MESSAGE_USER` 控制。
+- `pii` = `createMessageFilterPii`。
+- 除非另有说明，处理器都内联在 `routes/agents/index.js` 中。
+
+| 方法 | 路径 | 中间件 | 处理器 | 说明 |
+|---|---|---|---|---|
+| GET | /api/agents/chat/stream/:streamId | – | 内联 | **SSE**（`GenerationJobManager` 带重放的订阅；`?resume=true`、`generationCreatedAt`） |
+| GET | /api/agents/chat/active | – | 内联 | `{activeJobIds}` |
+| GET | /api/agents/chat/status/:conversationId | – | 内联 | 任务状态和恢复状态 |
+| POST | /api/agents/chat/abort | cfg | 内联 | |
+| POST | /api/agents/chat/steer | cfg, steerLim, pii, moderateText | SteerController（`A/controllers/agents/steer.js`） | |
+| POST | /api/agents/chat/steer/deliver | cfg, steerLim, pii, moderateText | SteerController.SteerDeliveryController | |
+| POST | /api/agents/chat/steer/cancel | cfg, steerLim | SteerCancelController | |
+| POST | /api/agents/chat/steer/arm | cfg, steerLim | SteerArmController | |
+| POST | /api/agents/chat/queued-turns | cfg, steerLim, pii, moderateText | AgentQueuedTurnEnqueueController（`A/controllers/agents/queuedTurns.js`） | |
+| GET | /api/agents/chat/queued-turns | cfg | AgentQueuedTurnListController | |
+| DELETE | /api/agents/chat/queued-turns/:queuedTurnId | cfg, steerLim | AgentQueuedTurnCancelController | |
+
+**(f) `router.use('/', v1)`**（`routes/agents/v1.js`），仍在 JWT 之下。
+- 控制器位于 `A/controllers/agents/v1.js`。
+- `use` = gCA(AGENTS:USE)，`create` = gCA(AGENTS:USE+CREATE)。
+- `acc(P)` = `canAccessAgentResource({requiredPermission: P, resourceIdParam: 'id'})`。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| GET | /api/agents/actions | cfg | 内联（`routes/agents/actions.js`） |
+| POST | /api/agents/actions/:agent_id | cfg, canAccessAgentResource(EDIT, `agent_id`), create | 内联 |
+| DELETE | /api/agents/actions/:agent_id/:action_id | cfg, canAccessAgentResource(EDIT), create | 内联 |
+| GET | /api/agents/tools | cfg | getAvailableTools（PluginController） |
+| GET | /api/agents/tools/calls | cfg | getToolCalls（`A/controllers/tools.js`） |
+| GET | /api/agents/tools/:toolId/auth | cfg | verifyToolAuth |
+| POST | /api/agents/tools/:toolId/call | cfg, toolCallLimiter, filterToolArguments | callTool |
+| GET | /api/agents/categories | – | v1.getAgentCategories |
+| POST | /api/agents | create, cfg | v1.createAgent |
+| GET | /api/agents/:id | use, acc(VIEW) | v1.getAgent |
+| GET | /api/agents/:id/expanded | use, acc(EDIT) | v1.getAgent(expanded=true) |
+| GET | /api/agents/:id/versions | use, acc(EDIT) | v1.getAgentVersions |
+| PATCH | /api/agents/:id | create, cfg, acc(EDIT), cfg | v1.updateAgent |
+| POST | /api/agents/:id/duplicate | create, cfg, acc(EDIT), cfg | v1.duplicateAgent |
+| DELETE | /api/agents/:id | create, acc(DELETE) | v1.deleteAgent |
+| POST | /api/agents/:id/revert | create, cfg, acc(EDIT), cfg | v1.revertAgentVersion |
+| GET | /api/agents | use | v1.getListAgents |
+
+**(g) `/api/agents/chat`**：一个包装 `routes/agents/chat.js` 的 `chatRouter`。
+- `chatRouter`：cfg。启用消息限流时，它会添加 generationRetryProbeLimiter、detectGenerationRetry、generationRetryLimiter、messageIpLimiter 和 messageUserLimiter，并对智能体触发器和定时任务豁免。
+- `chat.js` 路由器级：restoreResumeContext、createMessageFilterPii、moderateText、checkAgentAccess（gCA AGENTS:USE，带 skipAgentCheck）、`canAccessAgentFromBody(VIEW)`、validateConvoAccess、guardSubagentThreadTurn、buildEndpointOption。
+
+| 方法 | 路径 | 处理器 | 说明 |
+|---|---|---|---|
+| POST | /api/agents/chat/resume | ResumeController（`A/controllers/agents/resume.js`） | HITL 恢复；返回 JSON 确认，流通过 /chat/stream 获取 |
+| POST | /api/agents/chat | AgentController（`A/controllers/agents/request.js`） | JSON 确认 `{streamId, conversationId, generationProtocolVersion,...}`；客户端随后打开 GET /chat/stream/:streamId SSE |
+| POST | /api/agents/chat/:endpoint | AgentController | 临时智能体；响应结构相同 |
+
+### `/api/memories`：`routes/memories.js`
+路由器级：JWT。处理器为内联，但 `/id/:id` 路由除外，它们使用 `P/memory/handlers.ts` 中的 `createMemoryManagementHandlers`。
+- `lim` = `express.json({limit:'100kb'})`
+- 分区校验器来自 `createAgentMemoryPartitionMiddleware`：body、query，以及一个带 `allowMissingAgent` 的删除变体。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| GET | / | gCA(MEMORIES:USE+READ), cfg | 内联 |
+| POST | / | lim, gCA(USE+CREATE), validateBodyAgentPartition, cfg | 内联 |
+| PATCH | /preferences | gCA(USE+OPT_OUT) | 内联 |
+| PATCH | /id/:id | lim, gCA(USE+UPDATE), validateQueryAgentPartition, cfg | opaqueMemoryHandlers.updateById |
+| DELETE | /id/:id | gCA(USE+UPDATE), validateDeletedAgentPartition | opaqueMemoryHandlers.deleteById |
+| PATCH | /:key | lim, gCA(USE+UPDATE), validateQueryAgentPartition, cfg | 内联 |
+| DELETE | /:key | gCA(USE+UPDATE), validateDeletedAgentPartition | 内联 |
+
+### `/api/schedules`：`routes/schedules.js`
+挂载在 `rejectScheduleWritesUntilReady` 之后。路由器级：JWT、cfg。处理器来自 `P/schedules/handlers.ts` 中的 `createSchedulesHandlers`。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| GET | / | gCA(SCHEDULES:USE) | listSchedules |
+| GET | /:id | gCA(USE) | getSchedule |
+| POST | / | gCA(USE+CREATE) | createSchedule |
+| PATCH | /:id | gCA(USE+CREATE) | updateSchedule |
+| DELETE | /:id | gCA(USE+CREATE) | deleteSchedule |
+| POST | /:id/run | messageIpLimiter（如果设置了 `LIMIT_MESSAGE_IP`）, gCA(USE+CREATE) | runScheduleNow |
+
+### `/api/permissions`：`routes/accessPermissions.js`
+路由器级：JWT、checkBan、uaParser。控制器位于 `A/controllers/PermissionsController.js`。
+
+`checkResourcePermissionAccess(SHARE)` 使用 `createAgentAdminPermissionAccess`。它的回退逻辑按 resourceType 分派 `canAccessResource`：
+- agent、remoteAgent、promptGroup
+- mcpServer（通过 `findMCPServerByObjectId` 解析）
+- skill（通过 `getSkillById` 解析）
+- codeEnvironment、sharedLink
+- 其他任何类型返回 400
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| GET | /search-principals | checkPeoplePickerAccess | searchPrincipals |
+| GET | /:resourceType/roles | – | getResourceRoles |
+| GET | /:resourceType/:resourceId | checkResourcePermissionAccess(SHARE) | getResourcePermissions |
+| PUT | /:resourceType/:resourceId | checkResourcePermissionAccess(SHARE), checkShareAccessUnlessAgentAdmin, checkSharePublicAccess, rejectSharedLinkOwnerPermissionChanges | updateResourcePermissions |
+| GET | /:resourceType/effective/all | – | getAllEffectivePermissions |
+| GET | /:resourceType/:resourceId/effective | – | getUserEffectivePermissions |
+
+### `/api/tags`：`routes/tags.js`
+路由器级：JWT、gCA(BOOKMARKS:USE)。处理器为内联。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | / | |
+| POST | / | |
+| PUT | /:tag | tag 会做 URI 解码 |
+| DELETE | /:tag | |
+| PUT | /convo/:conversationId | 请求体 `{tags}` |
+
+### `/api/mcp`：`routes/mcp.js`
+没有路由器级中间件。控制器位于 `A/controllers/mcp.js`；其他处理器为内联。
+- `mcpUse` = gCA(MCP_SERVERS:USE)，`mcpCreate` = gCA(MCP_SERVERS:USE+CREATE)。
+- `srvAcc(P)` = `canAccessMCPServerResource({requiredPermission: P, resourceIdParam: 'serverName'})`。
+
+| 方法 | 路径 | 中间件 | 处理器 | 说明 |
+|---|---|---|---|---|
+| GET | /tools | JWT, cfg, mcpUse | getMCPTools | |
+| GET | /:serverName/oauth/initiate | JWT, setOAuthSession | 内联 | 重定向到 IdP |
+| GET | /:serverName/oauth/callback | – | 内联 | 公开（state + CSRF cookie）；重定向到 `/oauth/success` 或 `/oauth/error` |
+| GET | /oauth/tokens/:flowId | JWT | 内联 | |
+| POST | /:serverName/oauth/bind | JWT, setOAuthSession | 内联 | 在路径 `/api/mcp` 上设置 CSRF cookie |
+| GET | /oauth/status/:flowId | JWT | 内联 | |
+| POST | /oauth/cancel/:serverName | JWT | 内联 | |
+| POST | /:serverName/reinitialize | JWT, cfg, mcpUse, setOAuthSession | 内联 | |
+| GET | /connection/status | JWT, cfg | 内联 | |
+| GET | /connection/status/:serverName | JWT, cfg | 内联 | |
+| GET | /:serverName/auth-values | JWT, mcpUse | 内联 | |
+| GET | /servers | JWT, mcpUse | getMCPServersList | |
+| POST | /servers | JWT, mcpCreate | createMCPServerController | |
+| GET | /servers/:serverName | JWT, mcpUse, srvAcc(VIEW) | getMCPServerById | |
+| PATCH | /servers/:serverName | JWT, mcpCreate, srvAcc(EDIT) | updateMCPServerController | |
+| DELETE | /servers/:serverName | JWT, mcpCreate, srvAcc(DELETE) | deleteMCPServerController（附带 maybeUninstallOAuthMCP） | |
+
+### `/api/rum`：`routes/rum.js`
+两条路由都是到上游 collector 的 OTLP 透传（`proxyRumRequest`，`P/rum/proxy.ts`）。`requireRumProxyAuth` 是一个 JWT 检查，认证失败时返回 204 而不是认证错误；它位于 `A/middleware/requireJwtAuth.js`。
+
+| 方法 | 路径 | 中间件 | 处理器 |
+|---|---|---|---|
+| POST | /v1/traces | requireRumProxyEnabled（关闭时返回 404）, requireRumProxyAuth, `express.raw`（protobuf/octet-stream） | proxyTelemetry |
+| POST | /v1/logs | 同上 | proxyTelemetry |
+
+### `/metrics` 与 `/api` openapi
+
+| 方法 | 路径 | 认证 | 处理器 | 说明 |
+|---|---|---|---|---|
+| GET | /metrics | `Authorization: Bearer $METRICS_SECRET` | metricsHandler（`P/app/metrics.ts` 约 L1035） | Prometheus 文本格式；未设置密钥时返回 401 |
+| GET | /api/openapi.json | 公开 | `P/openapi/router.ts` | 除非 `config.openapi.enabled`，否则返回 404 |
+| GET | /api/docs | 公开 | 同一文件 | Swagger HTML |
+| GET | /api/docs/assets/* | 公开 | `express.static(swagger-ui-dist)` | |
+
+---
+
+## 4. 移植时需要保留的行为
+- **路由顺序很重要。** `rejectChatStartsUntilReady` 挂载在 `/api/agents/chat` 上，位于 `/api/agents` 路由器之前。在 agents 路由器内部，`/v1/*` 机器认证路由器注册在 JWT 之前；而在 `chatRouter` 之前注册的 `/chat/*` 路由会跳过消息限流器和 `buildEndpointOption`。
+- **流式（SSE）：**
+  - `GET /api/agents/chat/stream/:streamId`
+  - `GET /api/convos/:p/subagents/:t/tasks/:k/activity`
+  - `POST /api/assistants/v{1,2}/chat`
+  - `POST /api/agents/v1/chat/completions` 和 `/api/agents/v1/responses`，当 `stream: true` 时
+  - 文件和图片上传，在选择启用时（见 `/api/files`）
+- **下载与流式响应体：**
+  - `/api/files/download/:userId/:file_id`
+  - `/api/files/code/download/:session_id/:fileId`
+  - `/api/share/:shareId/files/:file_id[/download]`
+  - `/api/admin/audit-log/export.csv`
+  - `/api/skills/:id/files/*relativePath`
+  - TTS 音频响应
+  - `/images/*` 静态文件
+- **Multipart 上传：**
+  - `/api/files`、`/api/files/images`、`/api/files/images/avatar`、`/api/files/images/agents/:agent_id/avatar`、`/api/files/images/assistants/:assistant_id/avatar`
+  - `/api/files/speech/stt`（字段 `audio`）
+  - `/api/convos/import`
+  - `/api/skills/import` 和 `/api/skills/:id/files`
+  - `/api/agents/v1/agents/:id/files`
+- **认证类型：**
+  - 基于 Cookie 或 Bearer 的 JWT，支持复用 OpenID 令牌。
+  - `/api/agents/v1/{responses, chat/completions, models, events}` 上的远程智能体 OIDC 或 API 密钥认证。
+  - `/api/agents/v1/{agents, skills}` 上的 M2M OIDC client-credentials 认证。
+  - `/metrics` 上的 Bearer `METRICS_SECRET`。
+  - 公开：`/health`、`/livez`、`/readyz`、`/oauth/*`、登录/注册/重置密码/刷新路由、`/api/admin/oauth/*` 的起始和回调路由以及 `/exchange` 和 `/refresh`、action 和 MCP 的 OAuth 回调、`/api/user/verify*`、`/api/config`（可选认证）、`/api/banner`（可选认证）、分享页视图（可选认证），以及 openapi。
