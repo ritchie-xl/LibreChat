@@ -1,5 +1,7 @@
 # @librechat/agents SDK Architecture
 
+**English** · [中文](../zh/agents-sdk/README.md)
+
 `@librechat/agents` ([LibreChat-AI/agents](https://github.com/LibreChat-AI/agents)) is the agent runtime
 underneath every LibreChat chat. The LibreChat backend
 ([backend architecture](../README.md), section 9) authenticates a request, builds the agent configuration and

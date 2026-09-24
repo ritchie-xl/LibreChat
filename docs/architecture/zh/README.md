@@ -1,5 +1,7 @@
 # LibreChat 后端架构
 
+[English](../README.md) · **中文**
+
 本文是 LibreChat 后端的全景图，从数据库一直讲到 HTTP API。它面向用 Python 重新实现后端的团队。前端（`client/`、`packages/client`）不在范围内，只有后端必须保持、前端所依赖的契约除外。
 
 - **快照：** `v0.8.8-rc4`（`361553f`）。这个分支在上游 LibreChat 的基础上增加了大量功能：定时聊天、智能体事件触发器、排队轮次、子智能体、技能、附加代码环境、管理面板 API、洞察（insights）、Langfuse 链路追踪和多租户。

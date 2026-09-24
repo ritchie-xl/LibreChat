@@ -1,5 +1,7 @@
 # @librechat/agents SDK 架构
 
+[English](../../agents-sdk/README.md) · **中文**
+
 `@librechat/agents`（[LibreChat-AI/agents](https://github.com/LibreChat-AI/agents)）是每一次 LibreChat 聊天背后的
 智能体运行时。LibreChat 后端
 （[后端架构](../README.md) 第 9 节）负责认证请求、构建智能体配置并持久化结果。之后的工作由 SDK 接手：

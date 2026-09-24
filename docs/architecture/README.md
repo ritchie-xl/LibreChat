@@ -1,5 +1,7 @@
 # LibreChat Backend Architecture
 
+**English** · [中文](zh/README.md)
+
 This is a map of the LibreChat backend, from the database up to the HTTP API. It is written for a
 team re-implementing the backend in Python. The frontend (`client/`, `packages/client`) is out of
 scope, except where the backend has to keep a contract the frontend depends on.
