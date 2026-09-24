@@ -376,3 +376,137 @@ AgentUpdate = { type:'agent_update', agent_update:{ index, runId, agentId } };
 
 ---
 
+## 5. 处理器注册表与回调模型
+
+- `HandlerRegistry` 是一个 `Map<string, EventHandler>`，**每个事件只有一个处理器**。`composeEventHandlers(...sets)` 把共用同一个键的处理器串联起来，按顺序执行，并保留 `SDK_STREAM_DISPATCH` 标记。
+- **宿主如何接入：** 把 `customHandlers` 传给 `RunConfig`。LibreChat 的标准处理器集合（见 `src/utils/handlers.ts:createHandlers` 和 `src/session/handlers.ts:createRunHandlers`）为：
+  - `on_chat_model_stream: new ChatModelStreamHandler()`
+  - `on_chat_model_end: new ModelEndHandler(collectedUsage)`
+  - `on_tool_end: new ToolEndHandler(cb)`，会跳过标记为程序化工具调用的调用
+  - `on_run_step`、`on_run_step_delta`、`on_run_step_completed`、`on_message_delta`、`on_reasoning_delta`、`on_summarize_delta`、`on_summarize_complete`：每个都转发到 SSE，并调用 `aggregateContent`
+  - `on_run_step_closed`
+  - `on_tool_execute`：宿主执行工具并调用 `resolve`
+  - 按需添加 `on_subagent_update`、`on_context_usage`、`on_agent_log`
+- `processStream(..., {callbacks: ClientCallbacks})` 会添加 LangChain 回调方法，每个都以 `(graph, ...args)` 调用。
+- `createMetadataAggregator()` 是一个收集 `response_metadata` 的 `handleLLMEnd` 回调。
+- 子图只继承父级的 `on_tool_execute` 和 `on_subagent_update` 处理器（`src/graphs/Graph.ts` 约 L218）。子图的其他所有事件都被包装进 `on_subagent_update`。
+
+---
+
+## 6. 适配器与 AgentSession
+
+### 6.1 `./openai`：Chat Completions SSE
+
+- 初始化：`createOpenAIStreamTracker()` 和 `createOpenAIHandlers({writer, context:{requestId, model, created}, tracker})`。
+- `on_message_delta` → `data: {object:'chat.completion.chunk', choices:[{index:0, delta:{content}, finish_reason:null}]}`。第一个块总是 `{role:'assistant'}`。
+- `on_reasoning_delta` → `delta.reasoning`。
+- `on_run_step_delta`（tool_calls）→ `delta.tool_calls[{index, id?, type:'function', function:{name?, arguments}}]`，按步骤跟踪参数增量。
+- `on_run_step`（tool_calls）→ 发送完整的调用，只计算尚未发送的参数后缀。
+- `on_chat_model_end` → 累计用量。
+- `sendOpenAIFinalChunk(config, finishReason?)` 发送带 `finish_reason` 的块（如果最后一个块是工具调用则为 `tool_calls`，否则为 `stop`），然后发送一个带 `completion_tokens_details.reasoning_tokens` 的用量块，最后发送 `data: [DONE]`。
+- 辅助函数：`createChatCompletionChunk`、`createChatCompletionUsageChunk`、`writeOpenAISSE`。
+
+### 6.2 `./responses`：Responses API SSE
+
+- 初始化：`createResponseTracker()` 和 `createResponsesEventHandlers({writer, context:{responseId, model, createdAt, previousResponseId?, instructions?}, tracker})`。
+- 每个事件都写成 `event: <type>\ndata: {…, sequence_number}`。
+- 第一个事件是 `response.created`。
+- `on_message_delta` → 一个 `message` 项（先 `output_item.added`，再 `response.output_text.delta`）。
+- `on_reasoning_delta` → 一个 `reasoning` 项（`response.reasoning_text.delta`）。
+- `on_run_step` / `on_run_step_delta`（tool_calls）→ `function_call` 项（`output_item.added`、`response.function_call_arguments.delta`）。
+- `on_run_step_completed` → `function_call_arguments.done` 和 `output_item.done`。
+- `on_chat_model_end` → 用量。
+- `emitResponseCompleted()` 关闭所有未关闭的项（`output_text.done`、`reasoning_text.done`、`output_item.done`），然后发送带完整 `ResponseObject` 和用量的 `response.completed`，最后发送 `[DONE]`。
+- `buildResponse()` 也被导出。
+
+### 6.3 `AgentSession`（`src/session/AgentSession.ts`）
+
+`AgentSession` 是对 `Run` 的高层程序化封装，类似于 agent SDK 中的会话。LibreChat 服务端并不使用它。
+
+- `AgentSession.create(config)` 或 `createAgentSession(config)`。`config` 是一个 `RunConfig`，外加 `cwd`、`sessionPath`、`sessionId`、`name`、`ephemeral` 和 `checkpointing`（布尔值或 `{enabled, checkpointer}`）。
+- 持久化使用 JSONL 树形存储（`JsonlSessionStore`）。条目类型：message、summary、compaction、checkpoint、label、run_event、session_state。每个条目都有 `parentId`，因此支持分支。
+- `run(input)` 返回 `AgentSessionRunResult {text, content, messages, usage{inputTokens, outputTokens, totalTokens}, steps, interrupt, haltedReason, runId, threadId}`。
+- `stream(input)` 返回一个 `AgentSessionStream`：由 `AgentSessionStreamEvent {type, sequence, runId, threadId, timestamp, data?}` 组成的异步可迭代对象，外加 `toTextStream()` 和 `finalResult()`。事件类型：
+  - `run.started`、`message.delta`、`reasoning.delta`
+  - `tool.started`（来自 tool_calls 的 `on_run_step`）、`tool.delta`、`tool.completed`
+  - `step.finished`（来自 `on_run_step_closed`）、`usage.updated`
+  - `run.completed`、`run.failed`、`run.interrupted`、`run.halted`
+- 其他方法：`resumeInterrupt()`、`resumeSession()`、`clone()`、`fork(entryId)`、`branch(entryId, {summarizeAbandoned})`、`compact({instructions, retainRecentTurns})`、`getLatestCheckpoint()`。
+- 内部每次运行都会用 `returnContent: true` 和 `createRunHandlers()` 创建一个新的 `Run`；用户处理器会合并进来。校准比值和淡化层级在运行之间延续。
+- `createRunHandlers`（`src/session/handlers.ts`）是一个完整消费方的参考实现：聚合器、步骤列表、用量合计以及规范化的事件流。
+
+---
+
+## 7. Python 重新实现指南
+
+### 7.1 在 LangGraph Python 上复现事件契约
+
+- **不要依赖 `astream_events` 的自定义事件回送。** 应当复现 TypeScript 的*主*路径：由一个 `Graph` 对象持有 `handler_registry`，`dispatch_run_step`、`dispatch_message_delta`、`dispatch_reasoning_delta`、`dispatch_run_step_delta` 和 `close_run_step` 直接调用 `await handler.handle(event, data, metadata, graph)`。可以选择通过 `adispatch_custom_event` 为 LangSmith/Langfuse 回送一份，并用同样的 `(event, step_id)` 计数器对回送去重。
+- **驱动块：** 在智能体节点中调用 `model.astream(messages, config)`，并把每个 `AIMessageChunk` 交给 Python 版的 `ChatModelStreamHandler.handle(chunk, metadata, graph)`。这就是 TypeScript 的图内路径，也是支持抢占的那条路径。`metadata` 来自 `config["metadata"]`，LangGraph 会在其中填入 `langgraph_node`、`langgraph_step`、`langgraph_checkpoint_ns` 和 `thread_id`。
+- **外层循环：** `async for ev in graph.astream_events(inputs, config, version="v2")`，然后把 `on_chat_model_end`、`on_tool_end` 和 `on_chain_stream` 路由到注册表。通过 chain-stream 块中的 `"__interrupt__"` 检测中断，或者使用 `stream_mode=["updates","custom","messages"]` 并检查 updates 中的 `__interrupt__` 键。另一种做法是使用 `graph.astream(..., stream_mode=["custom","updates"])`，并通过 `get_stream_writer()` 写出步骤事件。这样可以彻底去掉双通道；此时关闭消息步骤要挂在 `on_chat_model_end` 上，或在 `ainvoke` 之后自行调用 `closeOpenMessageStep`。
+- **工具完成：** ToolNode 调用 `graph.handler_registry[ON_RUN_STEP_COMPLETED]`，然后调用 `graph.record_step_completion(step_id, tool_call_id, at)`，当该步骤没有待完成的工具调用时关闭步骤。
+- **`on_tool_execute`：** 在请求中传入一个 `asyncio.Future`（`resolve` = `fut.set_result`），并在 ToolNode 内 await 它。
+- **需要保存在图上的状态：**
+  - `content_data: list[RunStep]`
+  - `content_index_map`
+  - `step_key_ids: dict[str, list[str]]`
+  - `message_ids_by_step_key`、`prelim_message_ids`
+  - `tool_call_step_ids`、`pending_tool_calls_by_step`
+  - `open_message_step_by_agent`
+  - `message_step_has_tool_calls`
+  - `next_content_index`
+  - `stream_segment`
+  - 每个智能体的 `current_token_type`、`token_type_switch`、`reasoning_transition_count`、`last_token`
+- **必须原样复现：** 步骤键公式、3.5 中的顺序规则，以及放在 `finally` 块中的运行结束清扫。
+
+### 7.2 Pydantic 模型（草图）
+
+```python
+class StepType(str, Enum): TOOL_CALLS="tool_calls"; MESSAGE_CREATION="message_creation"
+class MessageCreation(BaseModel): message_id: str; content_type: Literal["text","think"]|None=None; phase: Literal["commentary","final_answer"]|None=None
+class MessageCreationDetails(BaseModel): type: Literal["message_creation"]; message_creation: MessageCreation
+class ToolCall(BaseModel): id: str; name: str; args: dict|str; type: Literal["tool_call"]="tool_call"
+class ToolCallsDetails(BaseModel): type: Literal["tool_calls"]; tool_calls: list[ToolCall]=[]
+class RunStep(BaseModel):
+    id: str; type: StepType; index: int; stepIndex: int|None=None
+    stepDetails: MessageCreationDetails|ToolCallsDetails = Field(discriminator="type")
+    runId: str|None=None; agentId: str|None=None; groupId: int|None=None
+    created_at: int|None=None; status: Literal["in_progress","completed","cancelled","failed"]|None=None
+    completed_at: int|None=None; cancelled_at: int|None=None; failed_at: int|None=None
+    summary: "SummaryContentBlock|None"=None; usage: dict|None=None
+class ToolCallChunk(BaseModel): name: str|None=None; args: str|None=None; id: str|None=None; index: int|None=None; type: str|None="tool_call_chunk"
+class ToolCallDelta(BaseModel): type: StepType; tool_calls: list[ToolCallChunk]|None=None; summary: dict|None=None; auth: str|None=None; expires_at: int|None=None
+class RunStepDeltaEvent(BaseModel): id: str; delta: ToolCallDelta
+class TextPart(BaseModel): type: Literal["text"]; text: str; citations: list|None=None; tool_call_ids: list[str]|None=None; phase: str|None=None
+class ThinkPart(BaseModel): type: Literal["think"]; think: str
+class MessageDeltaEvent(BaseModel): id: str; delta: dict   # {"content": [TextPart...], "tool_call_ids": [...]}
+class ReasoningDeltaEvent(BaseModel): id: str; delta: dict  # {"content": [ThinkPart...]}
+class ProcessedToolCall(BaseModel): id: str; name: str; args: str; output: str; progress: float=1; outcome: str|None=None
+class ToolCompleteResult(BaseModel): id: str; index: int; type: Literal["tool_call"]="tool_call"; tool_call: ProcessedToolCall; completed_at: int|None=None; eager: bool|None=None
+class RunStepCompletedEvent(BaseModel): result: ToolCompleteResult|"SummaryCompletedResult"
+class RunStepClosedEvent(BaseModel): id: str; index: int; type: StepType; status: Literal["completed","cancelled","failed"]; closed_at: int; created_at: int|None=None; runId: str|None=None; agentId: str|None=None; groupId: int|None=None; stepIndex: int|None=None
+# 另有 SummaryContentBlock、SummarizeStart/Delta/Complete、SubagentUpdateEvent、ContextUsageEvent、AgentLogEvent、ToolExecuteBatchRequest（resolve/reject 不参与序列化）、ToolExecuteResult
+```
+
+使用 `model_dump(exclude_none=True, by_alias=True)` 序列化。字段名必须与 TypeScript 类型中的 camelCase 或 snake_case 完全一致（`stepDetails`、`runId`、`agentId`、`groupId`、`stepIndex`，但 `created_at`、`closed_at`、`tool_call_ids`），因为 LibreChat 前端依赖它们。
+
+### 7.3 建议的模块布局
+
+```
+librechat_agents/
+  common/enums.py        # GraphEvents, Providers, StepTypes, ContentTypes, ToolCallTypes, Constants
+  types/{run_step,events,content,tools,hitl,run_config}.py   # pydantic 模型
+  events/registry.py     # HandlerRegistry, compose_event_handlers, ModelEndHandler, ToolEndHandler
+  stream/chat_model_stream_handler.py  # 块→步骤/增量状态机、推理检测、<think> 解析、get_chunk_content
+  stream/aggregator.py   # create_content_aggregator（1:1 移植，含工具索引解析）
+  graphs/base.py         # 步骤簿记：dispatch_*、close_run_step、record_step_completion、清扫、步骤键
+  graphs/standard.py, graphs/multi_agent.py
+  tools/tool_node.py     # 直接 + 事件驱动（on_tool_execute future）、完成事件分发
+  tools/handlers.py      # handle_tool_calls / handle_tool_call_chunks
+  summarization/node.py
+  run.py                 # Run.create/process_stream/resume/get_interrupt/generate_title、钩子、langfuse
+  adapters/openai_chat.py, adapters/responses.py
+  session/agent_session.py (可选)
+```
+
+`createContentAggregator` 以及 `ChatModelStreamHandler` 中的推理与工具调用状态机要逐行移植。前端兼容性最容易在这两处出问题。

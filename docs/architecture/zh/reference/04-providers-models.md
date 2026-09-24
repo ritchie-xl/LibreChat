@@ -177,3 +177,170 @@
 5. **否则。** `getOpenAIConfig(apiKey, {reverseProxyUrl: baseURL, headers, addParams, dropParams, customParams, directEndpoint, titleConvo, titleModel, titleMethod, titleMessageRole, streamRate, modelDisplayLabel, ...})`，并设置 `useLegacyContent = true`。
 
 ---
+
+## 3. librechat.yaml 的 `endpoints` schema（`packages/data-provider/src/config.ts`）
+
+根节点是 `endpoints`（strict，约第 3067 行）：
+- `allowedAddresses`
+- `all`：去掉 `baseURL` 的 `baseEndpointSchema`；在读取处优先生效的全局覆盖
+- `openAI`、`google`：`baseEndpointSchema`
+- `anthropic`：`anthropicEndpointSchema`
+- `azureOpenAI`：`azureEndpointSchema`
+- `assistants`、`azureAssistants`：`assistantEndpointSchema`
+- `agents`：`agentsEndpointSchema`
+- `custom`：`endpointSchema.partial()` 的数组
+- `bedrock`：`bedrockEndpointSchema`
+
+**`baseEndpointSchema`（第 672 行）**
+- 基础：`streamRate`、`baseURL`、`headers`（record）。
+- 标题：`titlePrompt`、`titleModel`（`current_model` 表示使用聊天模型）、`titleConvo`、`titleMethod`（`completion`|`functions`|`structured`）、`titleEndpoint`、`titlePromptTemplate`、`titleTiming`（`immediate`|`final`）。
+- 智能体 UI 标签：`activityLabel`、`activityModel`、`activityEndpoint`、`activityPrompt`、`activityMaxPerRun`、`activityCharLimit`、`activityPhase*`、`reasoningLabel*`。
+- `maxToolResultChars`。
+
+**`endpointSchema`（自定义，第 1606 行）** 在基础之上扩展：
+- `name`：不能是 `EModelEndpoint` 的值。
+- `apiKey`、`apiKeyPreview`、`baseURL`。
+- `models: {default: (string|{name, description})[] (min 1), fetch?, userIdQuery?}`。
+- `iconURL`、`modelDisplayLabel`。
+- `provider?: 'anthropic'`。
+- `headers`。
+- `addParams`：record；`web_search` 必须是布尔值。
+- `dropParams`：string[]。
+- `customParams`（strict）：
+  - `defaultParamsEndpoint`（默认 `custom`）、`reasoningFormat`、`reasoningKey`。
+  - `includeReasoningContent`、`includeReasoningHistory`。
+  - `paramDefinitions[]`：UI 设置定义，包含 key、type、default、range、options、component 等。
+- `directEndpoint`、`titleMessageRole`（`system`|`user`|`assistant`）。
+- `tokenConfig: Record<model, {prompt, completion, context, cacheRead?, cacheWrite?}>`，费率按每 1M token 计。
+
+**`azureEndpointSchema`（第 1668 行）**
+- `groups[]`（至少 1 个）。每个分组包含：`group`、`apiKey`、`serverless?`、`instanceName?`、`deploymentName?`、`version?`、`baseURL?`、`additionalHeaders?`、`addParams?`、`dropParams?`、`assistants?`。
+  - `models: Record<modelName, true | {deploymentName?, version?, assistants?}>`。
+- 顶层：`assistants?`，外加标题、活动和标签字段的 `.pick()`（并非全部基础字段）。
+- 校验后得到 `{modelNames, groupMap, modelGroupMap, assistantModels, assistantGroups}`（`validateAzureGroups`，`azure.ts:13`）。
+
+**`anthropicEndpointSchema`（第 1766 行）**
+- 基础字段，外加 `models?: string[]`。
+- `vertex?: {enabled?, projectId?, region (default us-east5), serviceKeyFile?, deploymentName?, models?: string[] | Record<model, true | {deploymentName?}>}`。运行时以 `vertexConfig` 暴露，带 `modelNames` 和 `modelDeploymentMap`。
+
+**`bedrockEndpointSchema`（第 766 行）**
+- 基础字段，外加 `availableRegions?`、`models?`、`guardrailConfig?`、`inferenceProfiles?`。
+
+**`assistantEndpointSchema`（第 783 行）**
+- 基础字段，外加 `disableBuilder`、`pollIntervalMs`、`timeoutMs`、`version`（默认 2）。
+- `supportedIds` / `excludedIds` / `privateAssistants`。
+- `retrievalModels`、`capabilities`（code_interpreter、image_vision、retrieval、actions、tools）。
+- `apiKey`、`models{default, fetch, userIdQuery}`、`headers`。
+
+**`agentsEndpointSchema`（第 1267 行）** 很大：capabilities、allowedProviders、statefulCodeSessions、toolApproval 等。它不在本章范围内。
+
+**仅通过环境变量启用端点**（`api/server/services/Config/EndpointService.js`）
+- `generateConfig(key, baseURL)` 给出 `{userProvide, userProvideURL}`，没有密钥时为 `false`。
+- Assistants 端点还会得到 `retrievalModels`、`capabilities` 和 `version`。
+- 存在 `GOOGLE_KEY` 或服务密钥文件时启用 Google（`loadAsyncEndpoints.js`）。
+
+---
+
+## 4. 模型列表的解析与缓存
+
+**路由**
+- `GET /api/models`（`routes/models.js` → `controllers/ModelController.js`）返回 `{...loadDefaultModels(req), ...loadConfigModels(req)}`，即端点名到 `string[]` 的映射。
+- `GET /api/endpoints`（`routes/endpoints.js` → `EndpointController` → `createEndpointsConfigService`，`packages/api/src/endpoints/config/endpoints.ts`）返回基于环境变量的默认端点配置，合并 `loadCustomEndpointsConfig(appConfig.endpoints.custom)`。该配置带有 `userProvide`、`userProvideURL`、`order`、`iconURL`、`modelDisplayLabel` 等。
+  - Azure：存在 YAML 时为 `{userProvide:false}`。
+  - 为 openAI 和 azure 按模型添加 `responsesApiRouting`（`config/responses.ts`）。
+  - 设置了 `azureOpenAI.assistants` 时添加 `azureAssistants`。
+  - Assistants：version、retrievalModels、disableBuilder、capabilities。
+  - Agents：capabilities、allowedProviders、statefulCodeSessions（过滤后）、maxSubagents。
+  - Bedrock：availableRegions 和 `userProvide*` 标志。
+  - 结果是排好序的。
+- `GET /api/endpoints/token-config`（`TokenConfigController`）返回上下文窗口；如果 `interface.contextCost` 开启，还返回价格。
+
+**默认模型**（`api/server/services/Config/loadDefaultModels.js`；函数在 `packages/api/src/endpoints/models.ts`）
+- **OpenAI。**
+  1. 如果设置了 `OPENAI_MODELS`，使用该列表。
+  2. 否则如果密钥由用户提供，使用 `defaultModels`。
+  3. 否则拉取 `GET {OPENAI_REVERSE_PROXY or https://api.openai.com/v1}/models`。在 api.openai.com 上，列表按 `/(text-davinci-003|gpt-|o\d+|chat-latest)/` 过滤，并排除 `audio`/`realtime`。
+- **Azure。** `AZURE_OPENAI_MODELS` 环境变量（YAML 的 `modelNames` 通过配置模型覆盖它）。
+- **Assistants。** `ASSISTANTS_MODELS`，或从 `ASSISTANTS_BASE_URL` 拉取。
+- **Anthropic。** 先用 Vertex 的 `modelNames`，再用 `ANTHROPIC_MODELS`，再以 `x-api-key` 和 `anthropic-version: ANTHROPIC_VERSION || 2023-06-01` 拉取 `GET {base}/models`。
+- **Google。** `GOOGLE_MODELS` 或默认值。
+- **Bedrock。** `BEDROCK_AWS_MODELS` 或默认值。YAML 的 `bedrock.models` 会覆盖。
+- 内置默认值在 `packages/data-provider/src/config.ts`（`defaultModels`、`sharedOpenAIModels`、`sharedAnthropicModels`、`bedrockModels`）。
+
+**配置/自定义模型**（`packages/api/src/endpoints/config/models.ts`，`createLoadConfigModels`）
+- Azure 的 `modelNames`、`azureAssistants` 的 `assistantModels` 和 bedrock 的 `models` 排在最前。
+- 对每个具有 baseURL、apiKey、name 和 `models` 的自定义端点：
+  - **`fetch: true` 且为管理员密钥：** 每个请求内按 `baseURL__apiKey__sha256(headers)` 对拉取去重，token 配置复制到同源的兄弟端点，结果为空时回退到 `models.default`。
+  - **`fetch: true` 且密钥或 URL 由用户提供：** 加载用户的密钥值，并以 `skipCache` 拉取。URL 由用户提供时不转发请求头。
+  - **否则：** `models.default`（仅名称）。
+- 端点名会被规范化：`ollama` 转为小写。
+
+**`fetchModels`**（`models.ts`）
+- **请求头。** `Authorization: Bearer <apiKey>`，除非配置的请求头已经提供了一个。请求头会针对用户做模板解析。对 openai URL 添加 `OpenAI-Organization`。
+- **Ollama。** 以 `ollama` 开头的名称先尝试 `GET {base}/api/tags`。
+- **请求。** 5 秒超时。设置 `userIdQuery` 时带 `?user=<id>`。URL 由用户提供时使用 SSRF 安全的 agent。
+- **token 配置。** 如果响应匹配 OpenRouter 风格的 `inputSchema`（`data[].{id, pricing.{prompt, completion}, context_length}`），`processModelData` 把价格换算为每 1M 的费率，并以 `tokenKey` 存入 `tokenConfigCache`，另存一个按模型缓存作用域的键用于回填。
+- **缓存。** `standardCache(CacheKeys.MODEL_QUERIES)`，以 `sha256(baseURL:apiKey)[:32]` 为键，TTL **2 分钟**。转发了用户范围的请求头，或设置了 `userIdQuery` 且有用户时，跳过缓存。
+
+**模型校验**（`api/server/middleware/validateModel.js`）
+- 用正则 `^[a-zA-Z0-9][a-zA-Z0-9_.:/@+-]*$` 检查模型，最长 256 个字符。
+- 端点为 `userProvide` 时跳过。
+- 否则模型必须在 `modelsConfig[resolveModelCatalogKey(endpoint)]` 中。如果不在，记录一次 `ILLEGAL_MODEL_REQUEST` 违规并拒绝请求。
+
+---
+
+## 5. token、价格与上下文表
+
+**上下文窗口**（`packages/api/src/utils/tokens.ts`）
+- **表。** 按模型家族的静态映射：openAIModels、mistral、cohere、google、anthropic、deepseek、moonshot、meta、qwen、amazon、bedrock、xAI，以及 `aggregateModels`（并集）。
+- **按端点的 `maxTokensMap`：** azureOpenAI → openAI；openAI、agents 和 custom → aggregate；google；anthropic；bedrock。
+- **输出上限。** `maxOutputTokensMap` 和 `modelMaxOutputs` 保存输出上限。
+- **查找**（`getModelTokenValue`）：
+  1. 精确键。
+  2. `findMatchingPattern`：取作为小写模型名子串的最长键。对 `a/b` 形式的名称，先试完整名称，再试最后一个 `/` 之后的部分。长度相同时，最后定义的键胜出。
+  3. `system_default`。
+- **`getModelMaxTokens(model, endpoint, endpointTokenConfig)`。** 先用端点 token 配置的覆盖，再用 Anthropic 1M 上下文的特例，最后查表。
+- **`getModelMaxOutputTokens`。** 类似，带 Opus 5.5 和 Sonnet 4.6+ 的特例。
+- **对话覆盖。** 对话或预设上的 `maxContextTokens` 覆盖一切。
+
+**价格**（`packages/data-schemas/src/methods/tx.ts`）
+- **表**（每 1M token 的美元价格）：
+  - `tokenValues`：模型键 → `{prompt, completion}`。
+  - `cacheTokenValues`：键 → `{write, read}`。
+  - `premiumTokenValues` 和 `premiumCacheTokenValues`：`{threshold, prompt, completion}`。输入 token 数超过阈值时适用长上下文档位（例如 gpt-5.4 超过 272k、gemini-3.1 超过 200k）。
+  - `bedrockValues`。
+  - `defaultRate = 6`。
+- **`getValueKey(model, endpoint)`。** 在 `tokenValues` 上做模式匹配，带旧版 gpt-3.5/gpt-4 分桶（`4k`、`16k`、`8k`、`32k`、`gpt-4-1106`）。
+- **`getMultiplier({valueKey, model, endpoint, tokenType, inputTokenCount, endpointTokenConfig})`。** 顺序：endpointTokenConfig 的按模型费率 → premium 费率 → `tokenValues` → `defaultRate`。
+- **`getCacheMultiplier`。** 顺序相同，但没有缓存价格时返回 `null`。
+- **这些在哪里使用。**
+  - `buildTokenConfigMap` / `resolveTokenConfigMap`（`packages/api/src/endpoints/pricing.ts`、`tokenConfig.ts`）为客户端生成 `{endpoint: {model: {context, prompt?, completion?, cacheWrite?, cacheRead?}}}`。
+  - 余额和交易计费使用相同的乘数（token × 费率）。
+- **缓存键**（`packages/api/src/endpoints/keys.ts`）。带作用域的 token 配置键为 `\0token-config:v2\0{tenant|tenant-user}\0sha256(parts)`。
+
+---
+
+## 6. modelSpecs 语义
+
+**Schema**（`packages/data-provider/src/models.ts`），`specsConfigSchema`：
+- `enforce`（默认 false）、`prioritize`（默认 true）、`list[]`、`addedEndpoints[]`。
+
+**每个 `TModelSpec`**
+- `name`（id）、`label` 和 `preset`。preset 是 `tModelSpecPresetSchema`：预设字段去掉 id、用户和数据库字段。
+- 显示：`order`、`default`、`softDefault`、`description`、`group`（端点名会把该规格嵌套在该端点下；其他任意字符串则形成自定义分组）、`groupIcon`、`showIconInMenu`、`showIconInHeader`、`showOnLanding`、`conversation_starters`、`showInMenu`（false 会把它从菜单和启动配置中隐藏，但仍允许按名称使用）、`iconURL`、`authType`、`hideBadgeRow`。
+- 智能体工具开关：`webSearch`、`fileSearch`、`executeCode`、`memory`、`askUserQuestion`、`runInBackground`、`describeIntent`、`artifacts`、`mcpServers[]`、`skills`、`subagents{enabled, allowSelf, shareFiles, agent_ids}`。
+
+**端点推断。** `resolveModelSpecEndpoint` 使用 `preset.endpoint`；如果没有该字段且设置了 `agent_id`，则推断为 `agents`。`materializeModelSpecEndpoints` 在加载配置时一次性写回。
+
+**服务端应用**（`api/server/middleware/buildEndpointOption.js`，辅助函数在 `packages/api/src/modelSpecs/index.ts`）
+- **`enforce: true`。**
+  1. 请求必须带 `spec`。否则报错 “No model spec selected”。
+  2. 该规格必须存在（“Invalid model spec”）。
+  3. 规格的端点必须等于请求的端点（“Model spec mismatch”）。
+  4. `applyModelSpecPreset(includePresetDefaults: true)` 用预设替换请求体，只保留请求中的 `chatProjectId`，并设置 `spec`。
+- **未强制但带有 `spec`。** 请求与规格合并。私有预设字段只在请求缺少时填入。
+- **重新解析。** 合并结果再次经过 `parseCompactConvo`，`iconURL` 来自规格。
+- **私有字段。** `promptPrefix`、`instructions`、`additional_instructions`、`system`、`context` 和 `examples` 从客户端负载中移除（`sanitizeModelSpecs`）。对非智能体端点，`promptPrefix` 的特殊变量（`{{current_date}}`、`{{current_user}}`、`{{iso_datetime}}`、`{{current_datetime}}`）在服务端解析，用户名会经过内容过滤。
+- **启动配置。** `modelSpecs: sanitizeModelSpecs(excludeHiddenModelSpecs(appConfig.modelSpecs))`（`routes/config.js:303`）；`skills` 和 `subagents.agent_ids` 也会被移除。
+
+---
