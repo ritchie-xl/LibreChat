@@ -344,3 +344,150 @@
 - **启动配置。** `modelSpecs: sanitizeModelSpecs(excludeHiddenModelSpecs(appConfig.modelSpecs))`（`routes/config.js:303`）；`skills` 和 `subagents.agent_ids` 也会被移除。
 
 ---
+
+## 7. Assistants API（OpenAI 与 Azure）简述
+
+**路由**（`api/server/routes/assistants/index.js`，挂载在 `/api/assistants`，带 JWT、封禁检查和配置中间件）
+- `/v1/`、`/v2/`：助手的 CRUD，代理到 OpenAI：`POST /`、`GET /:id`、`PATCH /:id`、`DELETE /:id`、`GET /`（列表）、`POST /avatar/:assistant_id`。
+- 子路由器 `/actions`（`POST /:assistant_id`、`DELETE /:assistant_id/:action_id/:model`）、`/tools`、`/documents`。
+- `/v1/chat`、`/v2/chat`：`POST /`，中间件为 `filterMessageContent → validateModel → buildEndpointOption → validateAssistant → validateConvoAccess → guardSubagentThreadTurn → chatController`，另有 `POST /abort`。
+
+**客户端**
+- `services/Endpoints/assistants/initalize.js`：`openai` SDK，使用 `ASSISTANTS_API_KEY`、`ASSISTANTS_BASE_URL`（都可以由用户提供）、请求头 `OpenAI-Beta: assistants=v{version}`、PROXY 和 org。
+- `azureAssistants/initialize.js`：把模型映射到 Azure 分组，构建 URL `https://{instance}.openai.azure.com/openai`，把 `api-version` 作为查询参数，加上 `api-key` 请求头和解析后的分组请求头；model = 部署名。
+
+**聊天流程**（`controllers/assistants/chatV2.js`）
+1. 余额检查。
+2. `initThread`（创建或复用 OpenAI 线程，添加带附件的消息）。
+3. `saveUserMessage`。
+4. 带 `instructions` / `additional_instructions`（promptPrefix、可选的当前日期时间）调用 `createRun`。
+5. 使用 `StreamRunManager`（以 SSE 流式输出运行事件、工具调用，以及为函数工具 / actions 调用 `submitToolOutputs`），或使用轮询（`services/AssistantService.js` 中的 `RunManager`、`waitForRun`、`runAssistant`）。
+6. `syncMessages` / `processMessages`（`services/Threads/manage.js`）转换线程消息，处理文件引用和图片文件。
+7. `saveAssistantMessage`。
+8. `addTitle`。
+9. 根据 `run.usage` 执行 `recordUsage`。
+
+`filterAssistants` 应用 `privateAssistants`（`metadata.author`）、`supportedIds` 和 `excludedIds`。`packages/api/src/assistants/protection.ts` 对助手线程的消息和文件做 PII/内容过滤。
+
+**Assistants 的标题**（`services/Endpoints/assistants/title.js`）
+- 一次硬编码的 `gpt-3.5-turbo` chat completion：“Please generate a concise title (max 40 characters)...”，temperature 0.7，max_tokens 20。
+- 出错时回退为截断到 40 个字符的文本。
+
+---
+
+## 8. 对话与预设参数 schema
+
+**`tConversationSchema`**（`packages/data-provider/src/schemas.ts:1115`）
+- **身份与状态：** conversationId、endpoint、endpointType、title（默认 “New Chat”）、user、messages[]、tags[]、chatProjectId、createdAt、updatedAt、isArchived、archivedAt、pinned、isShared、expiredAt、isTemporary、parentMessageId。
+- **代码：** codeApprovalMode、codeEnvironmentMode、codeWorkspaces[]。
+- **通用模型参数：** model、modelLabel、userLabel、promptPrefix、temperature、topP、topK、top_p、frequency_penalty、presence_penalty、maxOutputTokens、maxContextTokens、max_tokens、maxTokens、stop[]、stream、disableStreaming。
+- **Anthropic：** promptCache、promptCacheTtl（`5m`|`1h`）、system、thinking、thinkingBudget、effort、thinkingDisplay。
+- **Google：** thinkingLevel、context、examples[{input, output}]、url_context。
+- **OpenAI：** reasoning_effort、reasoning_summary、reasoning_mode、reasoning_context、verbosity、useResponsesApi、imageDetail。
+- **共享：** web_search、artifacts、resendFiles、file_ids、fileTokenLimit。
+- **Assistants 与智能体：** assistant_id、instructions、additional_instructions、append_current_datetime、agent_id、subagentThread。
+- **Bedrock：** region、additionalModelRequestFields。
+- **UI：** greeting、spec、iconURL、tools。
+- **其他：** presetOverride。
+- **已弃用：** chatGptLabel、resendImages。
+
+**`tPresetSchema`。** 对话 schema 去掉 conversationId、chatProjectId、时间戳和 title，再加上 `presetId`、`title`、`defaultPreset`、`order` 和 `endpoint`（任意字符串）。
+
+**按端点的 pick schema**（`parsers.ts:42`，`endpointSchemas`）。它们以白名单方式限定每个端点接受的参数，并去除 nullish 值：
+- **openAI、azureOpenAI、custom（`openAISchema`）：** model、modelLabel、promptPrefix、temperature、top_p、presence/frequency_penalty、resendFiles、artifacts、imageDetail、stop、max_tokens、reasoning_*、verbosity、useResponsesApi、web_search、disableStreaming、fileTokenLimit、maxContextTokens、spec、iconURL、greeting。
+- **openrouter：** 上述字段，外加 promptCache 和 promptCacheTtl。
+- **google：** model、modelLabel、promptPrefix、examples、temperature、maxOutputTokens、topP、topK、thinking、thinkingBudget、thinkingLevel、web_search、url_context 等。
+- **anthropic：** model、modelLabel、promptPrefix、temperature、maxOutputTokens、topP、topK、promptCache、promptCacheTtl、thinking、thinkingBudget、effort、thinkingDisplay、web_search、stop、stream 等。
+- **bedrock：** `bedrockInputSchema`。
+- **agents：** `compactAgentsSchema`。
+- **assistants：** `assistantSchema`。
+
+`parseCompactConvo({endpoint, endpointType, conversation, defaultParamsEndpoint})` 根据自定义端点的 `customParams.defaultParamsEndpoint` 选择 schema。
+
+**默认值**（`schemas.ts:439+` 中的 `openAISettings`、`anthropicSettings`、`googleSettings`、`agentsSettings`）：例如 OpenAI 的 temperature 为 1、top_p 为 1、惩罚项为 0；Anthropic 的默认模型、promptCache 为 true、`maxOutputTokens.reset(model)`。
+
+**预设路由**（`api/server/routes/presets.js`；存储在 `packages/data-schemas/src/methods/preset.ts`）
+- `GET /api/presets` 返回用户的预设，按 `order` 再按 `updatedAt` 降序排序，并经过内容过滤器投影。
+- `POST /api/presets`（带内容过滤器）执行 `savePreset`：
+  - 以 `{presetId, user}` 为键 upsert；`presetId` 默认为 UUID；`newPresetId` 用于重命名。
+  - `tools` 规范化为 pluginKey 字符串。
+  - `defaultPreset: true` 设置 `order = 0` 并取消之前的默认预设。`defaultPreset: false` 同时取消两者。
+- `POST /api/presets/delete {presetId?}` 删除一个预设，或删除该用户的所有预设。
+
+---
+
+## 9. 标题生成、内容审核与提示前缀
+
+**智能体标题**（`api/server/services/Endpoints/agents/title.js`、`client.js:5954 titleConvo`）
+- **启用条件。** 环境变量 `TITLE_CONVO`（默认 true）。端点的 `titleConvo !== false`。不是临时聊天。
+- **时机。** `resolveTitleTiming`（`providers.ts`）：先看 `endpoints.all.titleTiming`，再看端点候选，再看自定义配置；默认 `immediate`，即从第一条用户消息开始并行运行。`final` 在响应之后运行。
+- **端点配置。** `endpoints.all`，否则 `endpoints[endpoint]`，否则自定义配置。
+- **提供商与模型。** `titleEndpoint` 可以切换提供商/凭据。`titleModel` 覆盖模型（`current_model` 表示保持不变）。选项通过 `getProviderConfig().getOptions` 重新构建，移除最大 token 参数，并解析请求头。
+- **生成。** `@librechat/agents` 中的 `run.generateTitle({provider, clientOptions, inputText, contentParts, titleMethod, titlePrompt, titlePromptTemplate})`。
+  - `completion` = 普通提示；`functions` / `structured` = 工具或 JSON 输出（Google 使用 `json: true`）。
+  - 用量以 `context: 'title'` 记录（计费）。
+  - 结果经过 `sanitizeTitle`。
+- **超时与存储。** 45 秒超时。结果依次经过 `resolveConversationTitle`，然后写入缓存 `GEN_TITLE`，键为 `${userId}-${convoId}`（TTL 120 秒），然后 `onTitleGenerated`（SSE 事件），然后 `saveConvo({title}, noUpsert)`。如果该流已被取代，标题会被丢弃。
+
+**titlePolicy**（`api/server/services/Endpoints/titlePolicy.js` → `packages/api/src/protection/title.ts`）
+- 如果配置了 `filters.conversationTitles.pii` 且标题违反它，使用回退值 `"New Chat"`（前提是回退值被允许）；否则标题为 null（不保存）。
+
+**内容审核**（`api/server/middleware/moderateText.js`）
+- 在启用 `OPENAI_MODERATION` 时运行。
+- 收集 `text`/`answer`、ask-user 的回答、引用文本和工具审批决策文本。
+- 以 `Bearer OPENAI_MODERATION_API_KEY` POST 到 `OPENAI_MODERATION_REVERSE_PROXY || https://api.openai.com/v1/moderations`。
+- 任何 `flagged` 结果 → 以 `ErrorTypes.MODERATION` 执行 `denyRequest`。API 出错也会拒绝。
+- 用于智能体聊天和 convos 路由。
+
+**提示前缀。** `promptPrefix`（系统指令；对智能体而言，`instructions` 会与 `promptPrefix` 合并）。特殊变量 `{{current_date}}`、`{{current_user}}`、`{{iso_datetime}}`、`{{current_datetime}}` 经过 `replaceSpecialVars`（`specialVariables`，`config.ts:4455`）。设置了 `artifacts` 时会追加 artifacts 提示。
+
+---
+
+## 10. 语音转文字与文字转语音
+
+**路由**（`api/server/routes/files/speech/*`，挂载在 `/api/files/speech`，带按 IP 和按用户的限流器，限流前缀为 `STT` 和 `TTS`）
+- `POST /stt`：multer 单字段 `audio`，然后 `speechToText`。
+- `POST /tts/manual` `{input, voice}` → `textToSpeech`，以流式返回音频。对输入有 PII 过滤。
+- `POST /tts` `{messageId, runId, voice}` → `streamAudio`。它每 1.25 秒轮询一次消息缓存 / 数据库以获取新的文本分块，并增量合成。`AUDIO_RUNS` 缓存防止重复运行。
+- `GET /tts/voices`。
+- `GET /config/get` → `getCustomConfigSpeech`。返回 `sttExternal`、`ttsExternal` 和 `speechTab` 设置。旧版引擎名会被规范化为 `external`。
+
+**配置。** `speech.tts` 和 `speech.stt`（`config.ts:1781-1851`）。必须恰好配置一个提供商（`isSpeechProviderConfigured`）。`allowedAddresses` 提供 SSRF 控制。
+
+**TTS 提供商**（`services/Files/Audio/TTSService.js`）
+- **openai：** `url`（默认 `https://api.openai.com/v1/audio/speech`）、apiKey、model、voices。请求体 `{input, model, voice}`，Bearer 认证。
+- **azureOpenAI：** instanceName、deploymentName、apiVersion、model、voices。URL `https://{instance}.openai.azure.com/openai/deployments/{dep}/audio/speech?api-version=`，`api-key` 请求头。
+- **elevenlabs：** url（默认 `https://api.elevenlabs.io/v1/text-to-speech/{voice}[/stream]`）、websocketUrl、model、voices、voice_settings、pronunciation_dictionary_locators。`xi-api-key` 请求头。
+- **localai：** url、apiKey?、voices、backend。请求体 `{input, model: voice, backend}`。
+- 对所有提供商，voice 必须在 `voices` 中（或 `voices` 包含 `ALL`）。
+
+**STT 提供商**（`STTService.js`）
+- **openai：** url（默认 `/v1/audio/transcriptions`）、apiKey、model。multipart 字段 `file`、`model`，可选 `language`。
+- **azureOpenAI：** instanceName、deploymentName、apiVersion。25MB 上限；接受的格式为 flac、mp3、mp4、mpeg、mpga、m4a、ogg、wav、webm。
+
+---
+
+## 11. Python 对应方案
+
+| 关注点 | 建议的 Python 方案 |
+|---|---|
+| 统一的提供商调用 | **litellm**（`litellm.acompletion(model="openai/…", api_base=, api_key=, extra_headers=, drop_params=True)`）覆盖 OpenAI、Azure（`azure/<deployment>`、`api_version`）、Anthropic、Gemini/Vertex（`vertex_ai/`）、Bedrock（`bedrock/converse/…`、`aws_region_name`、`aws_session_token`）和 OpenRouter。它的 `drop_params` 和 `additional_drop_params` 大致对应 `dropParams`；`addParams` 就是 kwargs 合并。也可以用 LangChain（`langchain-openai` 的 ChatOpenAI/AzureChatOpenAI 配合 `use_responses_api`、`langchain-anthropic` 的 ChatAnthropic、`langchain-google-genai`/`langchain-google-vertexai`、`langchain-aws` 的 ChatBedrockConverse），它最接近当前基于 LangChain 的 `llmConfig` 结构。 |
+| 原生 SDK | `openai`（`AsyncOpenAI(base_url, default_headers, default_query, organization, http_client=httpx.AsyncClient(proxy=…))`、`AsyncAzureOpenAI`）、`anthropic`（`AsyncAnthropic`、`AsyncAnthropicVertex(region, project_id)`、`extra_headers={'anthropic-beta': …}`、`thinking=`、`metadata={'user_id'}`）、`google-genai`（`genai.Client(api_key=)` 或 `Client(vertexai=True, project, location)`、`types.ThinkingConfig(thinking_level/budget, include_thoughts)`、`types.Tool(google_search=…, url_context=…)`、`SafetySetting`）、`boto3` / `aioboto3` 的 `bedrock-runtime` `converse_stream`（`guardrailConfig`、`additionalModelRequestFields`；bearer 令牌通过 `AWS_BEARER_TOKEN_BEDROCK` 环境变量或自定义签名器）。 |
+| 代理与 SSRF | 自定义 `httpx.AsyncClient(proxy=PROXY, follow_redirects=False, transport=…)`，配合一个自定义的解析器/transport，按 `allowedAddresses` 校验解析出的 IP。 |
+| 配置 schema | 用 Pydantic v2 模型镜像 zod schema。严格的部分使用 `model_config = ConfigDict(extra='forbid')`。用 validator 解析 `${ENV}`。 |
+| 请求头模板 | 一个小的解析函数：先环境变量，再用户字段、请求体字段和 OIDC 令牌，使用正则占位符；丢弃未解析的值。 |
+| 模型列表缓存 | `aiocache` / Redis，TTL 120 秒，以 `sha256(baseURL:apiKey)` 为键；用 `asyncio.gather` 并行拉取，并通过 future 字典做请求内去重。 |
+| token/价格表 | Python 字典加上最长子串匹配器（精确移植 `findMatchingPattern`，包括 `/` 后缀回退和“最后定义者胜出”的平局规则）。litellm 的 `model_cost` 映射可以作为表的初始数据，但为保持一致，应移植 LibreChat 自己的表和 premium 阈值。 |
+| Assistants API | `openai.beta.assistants/threads/runs`（用 `runs.stream` 和 `AssistantEventHandler` 做流式）。注意 OpenAI 正在弃用 Assistants API，因此要考虑是否需要移植它。 |
+| 标题 | 一个小的异步任务：`asyncio.wait_for(…, 45)`，然后写缓存，再更新数据库。对 `structured`，使用提供商的 JSON schema 或工具调用（instructor 或 pydantic 输出）。 |
+| 内容审核 | `openai.moderations.create(input=[...])`。 |
+| STT/TTS | `openai.audio.transcriptions.create` / `audio.speech.with_streaming_response.create`；Azure 通过 `AsyncAzureOpenAI`；ElevenLabs 通过 `elevenlabs` SDK 或 httpx；LocalAI 通过 httpx POST。以 FastAPI `StreamingResponse(media_type='audio/mpeg')` 流式输出。 |
+| 用户密钥 | 用 `cryptography` 的 AES 加密存储（如果需要迁移数据，须与现有的 encrypt/decrypt 格式一致），并做 `expiresAt` 检查，抛出结构化错误。 |
+
+### 主要文件
+- **提供商初始化与配置：** `packages/api/src/endpoints/{config/providers.ts, config/endpoints.ts, config/models.ts, config/responses.ts, openai/initialize.ts, openai/config.ts, openai/llm.ts, openai/transform.ts, anthropic/*.ts, google/*.ts, bedrock/initialize.ts, custom/initialize.ts, models.ts, pricing.ts, tokenConfig.ts, keys.ts}`
+- **Schema 与模型数据：** `packages/data-provider/src/{schemas.ts, config.ts, parsers.ts, models.ts, azure.ts, bedrock.ts}`
+- **模型规格、请求头、token、价格：** `packages/api/src/modelSpecs/index.ts`、`packages/api/src/utils/{env.ts, headers.ts, tokens.ts, key.ts}`、`packages/data-schemas/src/methods/{tx.ts, preset.ts, key.ts}`
+- **服务端配置、控制器与中间件：** `api/server/services/Config/{EndpointService.js, loadDefaultEConfig.js, loadDefaultModels.js, loadAsyncEndpoints.js, getEndpointsConfig.js}`、`api/server/controllers/{ModelController.js, EndpointController.js, TokenConfigController.js}`、`api/server/middleware/{buildEndpointOption.js, validateModel.js, moderateText.js}`
+- **路由：** `api/server/routes/{models.js, endpoints.js, config.js, presets.js, keys.js, assistants/*, files/speech/*}`
+- **Assistants、标题与音频服务：** `api/server/services/{AssistantService.js, Runs/*, Threads/manage.js, Endpoints/assistants/*, Endpoints/azureAssistants/*, Endpoints/agents/title.js, Endpoints/titlePolicy.js, Files/Audio/*}`、`api/server/controllers/assistants/*`、`api/server/controllers/agents/client.js`（`titleConvo` 在第 5954 行）、`packages/api/src/agents/initialize.ts`（约第 1280 行，提供商装配（wiring））
